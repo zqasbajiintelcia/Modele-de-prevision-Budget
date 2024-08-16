@@ -48,7 +48,6 @@ numba==0.60.0
 numpy==2.0.1
 packaging==24.1
 pandas==2.2.2
-pandas-profiling==3.2.0
 parso==0.8.4
 partd==1.4.2
 patsy==0.5.6
