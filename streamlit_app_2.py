@@ -13,6 +13,9 @@ import warnings
 from joblib import Parallel, delayed
 import altair as alt
 import time
+import requests
+from streamlit_lottie import st_lottie
+
 # Suppress all warnings
 warnings.filterwarnings("ignore")
 
@@ -102,7 +105,7 @@ def evaluate_model(model, data):
 # Function to perform grid search
 def grid_search(data, p_values, d_values, q_values, P_values, D_values, Q_values, S_values, n_jobs=-1):
     best_aic = float('inf')
-    best_r2 = -1 * float('inf')
+    best_mae = float('inf')
     best_params = None
     best_model = None
     results_cache = {}
@@ -129,9 +132,9 @@ def grid_search(data, p_values, d_values, q_values, P_values, D_values, Q_values
     )
 
     for model, mae, r2, aic, order, seasonal_order in results:
-        if model is not None and aic < best_aic and r2 > best_r2:
+        if model is not None and aic < best_aic and mae < best_mae:
             best_aic = aic
-            best_r2 = r2
+            best_mae = mae
             best_model = model
             best_params = {'order': order, 'seasonal_order': seasonal_order}
     
@@ -147,6 +150,14 @@ def load_model(filename):
     with open(filename, 'rb') as file:
         model = pickle.load(file)
     return model
+
+def load_lottieurl(url: str):
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+
 
 
 # Function to forecast with trained model
@@ -319,5 +330,20 @@ with st.form(key='my_form'):
         # Display the selected values
         st.subheader("Selected Values")
         st.write(user_selection)
+        # Lottie animation URL
+        lottie_url = "https://assets7.lottiefiles.com/packages/lf20_lchqwoif.json"
+        lottie_animation = load_lottieurl(lottie_url)
 
-        main_prediction(data, user_selection)
+
+        
+        lottie_url = "https://lottie.host/0369e3df-c931-43ca-8372-d1ea94ed4c57/YrO04ImlAc.json"
+        lottie_animation = load_lottieurl(lottie_url)
+
+    
+
+            
+        with st.empty():
+            st_lottie(lottie_animation, height=200, width=200)
+            main_prediction(data, user_selection)
+        
+
