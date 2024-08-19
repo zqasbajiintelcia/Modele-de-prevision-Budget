@@ -11,12 +11,30 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score
 import warnings
 from joblib import Parallel, delayed
-
+import altair as alt
+import time
 # Suppress all warnings
 warnings.filterwarnings("ignore")
-pd.set_option('display.max_rows', 1000)
-pd.set_option('display.max_columns', 1000)
+
+#Page config
 st.set_page_config(layout="wide")
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+           .css-vl8c1e {backdrop-filter: none;}
+            .css-12ttj6m {
+                            border: none;
+                            padding: 0;
+                        }
+            </style>
+
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+
+#User selection initialisation
 user_selection=None
 
 @st.cache_data
@@ -26,6 +44,7 @@ def load_and_prepare_data(filename):
     data['Id_date_agr'] = pd.to_datetime(data['Id_date_agr'], format='%Y%m')
     data = data.sort_values(by='Id_date_agr', ascending=False)
     data.set_index('Id_date_agr', inplace=True)
+    data.index = data.index.to_period('M').to_timestamp('M')
     return data
 
 data = load_and_prepare_data('../datasets/final_pnl_gl_dataset-12-08-24_aggregated_per_month.csv')
@@ -136,21 +155,49 @@ def forecast_with_model(model, steps=12):
     
     forecast_mean = forecast.predicted_mean
     forecast_index = forecast_mean.index
+    forecast_band_inf  = forecast.conf_int().iloc[:, 0]
+    forecast_band_sup  = forecast.conf_int().iloc[:, 1]
 
-    return pd.Series(forecast_mean, index=forecast_index)
+    return pd.Series(forecast_mean, index=forecast_index) , pd.Series(forecast_band_inf, index=forecast_index), pd.Series(forecast_band_sup, index=forecast_index) 
 
 # Function to plot forecast
-def plot_forecast(data, forecast, title):
-    fig = plt.figure(figsize=(12, 6))
-    plt.plot(data.index, data['Montant(€)'], label='Historical Budget', color='blue')
-    plt.plot(forecast.index, forecast, label='Forecasted Budget', color='red')
-    plt.title(f'Historical and Forecasted Budget: {title}')
-    plt.xlabel('Date')
-    plt.ylabel('Budget')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-    st.pyplot(fig)
+def plot_forecast(data, forecast_elems, title):
+
+    chart = st.empty()
+
+    forecast_df = pd.DataFrame({'Date': forecast_elems[0].index, 'Montant(€)': forecast_elems[0], 'lower' : forecast_elems[1], 'upper' : forecast_elems[2]})
+    forecast_df['Type'] = 'Forecast'
+    
+    historical_df = pd.DataFrame({'Date': data.index, 'Montant(€)': data['Montant(€)']})
+    historical_df['Type'] = 'Historical'
+
+    history = alt.Chart(historical_df, title='Forecast').mark_line(color='blue').encode(
+        alt.X('Date:T', scale=alt.Scale(zero=False)),
+        alt.Y('Montant(€):Q', scale=alt.Scale(zero=False))).properties(
+        height=360, width=720).interactive()
+    chart.altair_chart(history, use_container_width=True)
+
+    for i in range(1,len(forecast_df)+1):
+        new_points = alt.Chart(forecast_df[0:i], title='Forecast').mark_line(
+        point=alt.OverlayMarkDef(color="green") ,
+        color='green').encode(
+                              alt.X('Date:T', scale=alt.Scale(zero=False)),
+                              alt.Y('Montant(€)', scale=alt.Scale(zero=False))).properties(
+                              height=360, width=720).interactive()
+        
+        # Confidence Interval Band
+        band = alt.Chart(forecast_df[0:i]).mark_area(color='red',
+                        opacity=0.1
+                    ).encode(
+                        x='Date:T',
+                        y='lower',
+                        y2='upper'
+                    )
+        chart.altair_chart(history + new_points + band, use_container_width=True)
+        time.sleep(0.25)
+
+
+
 
 
 
@@ -180,7 +227,7 @@ def main_prediction(data,user_selection):
         print(f"Loaded model from {model_filename}")
     except FileNotFoundError:
         # Hyperparameter grid
-        p_values = [3, 1, 2]
+        p_values = [0, 1, 2]
         d_values = [0, 1, 2]
         q_values = [0, 1, 2]
         P_values = [0, 1, 2]
@@ -205,13 +252,13 @@ def main_prediction(data,user_selection):
 
 
     # Forecast
-    forecast = forecast_with_model(best_model, user_selection['steps'])
+    forecast_elms = forecast_with_model(best_model, user_selection['steps'])
 
     # Plot results
     if user_selection is not None:
-        plot_forecast(filtered_data, forecast, ' / '.join([f'{k}: {v}' for k, v in list(user_selection.items())[1:] if v and user_selection]))
+        plot_forecast(filtered_data, forecast_elms, ' / '.join([f'{k}: {v}' for k, v in list(user_selection.items())[1:] if v and user_selection]))
     else:
-        plot_forecast(filtered_data, forecast, ' / all data')
+        plot_forecast(filtered_data, forecast_elms, ' / all data')
 
 
 # selection_columns = ['Code journal', 'No séquence', 'Id_Rub', 'ID_Compte', 'ID_Cc',
@@ -239,12 +286,12 @@ st.title("Prévoir le budget future")
 
 with st.form(key='my_form'):
     # Slider input
-    slider_value = st.slider("Select a value", min_value=1, max_value=12, step=1)
+    slider_value = st.slider("Choisir le mois future à prévoir", min_value=1, max_value=12, step=1)
 
     # Expanders for dropdowns
     dropdown_values = {}
 
-    with st.expander("Show/Hide Dropdown Selections"):
+    with st.expander("Appliquer des filtres spécifiques"):
 
     
         cols = st.columns(4)
@@ -258,7 +305,7 @@ with st.form(key='my_form'):
                     selected_values = values[1:]  # Exclude "All" from the list
                 
                 dropdown_values[col_name] = selected_values
-        submit_button = st.form_submit_button(label='Confirm')
+        submit_button = st.form_submit_button(label='Valider les filtres')
 
     if submit_button:
         st.write("Selections confirmed!")
