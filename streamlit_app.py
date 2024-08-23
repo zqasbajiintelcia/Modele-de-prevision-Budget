@@ -10,11 +10,34 @@ from itertools import product
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score
 import warnings
+from joblib import Parallel, delayed
+import altair as alt
+import time
+import requests
+from streamlit_lottie import st_lottie_spinner
+
 # Suppress all warnings
 warnings.filterwarnings("ignore")
-pd.set_option('display.max_rows', 1000)
-pd.set_option('display.max_columns', 1000)
+
+#Page config
 st.set_page_config(layout="wide")
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+           .css-vl8c1e {backdrop-filter: none;}
+            .css-12ttj6m {
+                            border: none;
+                            padding: 0;
+                        }
+            </style>
+
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+
+#User selection initialisation
 user_selection=None
 
 @st.cache_data
@@ -24,35 +47,67 @@ def load_and_prepare_data(filename):
     data['Id_date_agr'] = pd.to_datetime(data['Id_date_agr'], format='%Y%m')
     data = data.sort_values(by='Id_date_agr', ascending=False)
     data.set_index('Id_date_agr', inplace=True)
+    data.index = data.index.to_period('M').to_timestamp('M')
     return data
 
-data = load_and_prepare_data('../datasets/final_pnl_gl_dataset-12-08-24_aggregated_per_month.csv')
+data = load_and_prepare_data('../datasets/PNL_GL_EXTRACTION-19-08-2024_aggregated_per_month.csv')
 
 
 # Function to filter data based on user selection
 def filter_data(data, user_selection):
-    if user_selection is not None and list(user_selection.values())[1:] != [[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]]:
-        filtered_data = pd.DataFrame()
 
+    #Remove the slicer part
+    user_selection = dict(list(user_selection.items())[1:])
 
-        for key, value in list(user_selection.items())[1:]:
+    mask = pd.Series([True] * len(data), index=data.index)
 
-            if value is not None and value != []:
-                filtered_data = pd.concat([filtered_data, data[data[key].isin(value) ].groupby('Id_date_agr').agg({
-            'Montant(€)': 'sum',
-            'Montant 7€': 'sum'
-            })])
-                
-        filtered_data=filtered_data.groupby('Id_date_agr').agg({
-            'Montant(€)': 'sum',
-            'Montant 7€': 'sum'
-            })
-    else:
-        filtered_data = data.groupby('Id_date_agr').agg({
+# Apply filtering only for non-empty lists in filter_dict
+    for col, values in user_selection.items():
+        if values:  # Apply filtering only if the values list is not empty
+            mask &= data[col].isin(values)
+
+    # Apply the mask to filter the DataFrame
+    filtered_data = data[mask].groupby('Id_date_agr').agg({
             'Montant(€)': 'sum',
             'Montant 7€': 'sum'
             })
-    print(filtered_data.shape)    
+
+    # filtered_data = data[
+    # data.apply(lambda row: all(
+    #     row[col] in values if values != [] else True
+    #     for col, values in user_selection.items()
+    # ), axis=1)
+    #     ].groupby('Id_date_agr').agg({
+    #         'Montant(€)': 'sum',
+    #         'Montant 7€': 'sum'
+    #         })
+    
+    # if user_selection is not None and list(user_selection.values()) != [[], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], []]:
+        
+    #     filtered_data = pd.DataFrame()
+    #     copied_data = data.copy()
+
+    #     for key, value in list(user_selection.items()):
+
+    #         if value is not None and value != []:
+    #             filtered_data = pd.concat([filtered_data, copied_data[copied_data[key].isin(value)].groupby('Id_date_agr').agg({
+    #         'Montant(€)': 'sum',
+    #         'Montant 7€': 'sum'
+    #         })])
+        
+
+    #     filtered_data=filtered_data.drop_duplicates().groupby('Id_date_agr').agg({
+    #         'Montant(€)': 'sum',
+    #         'Montant 7€': 'sum'
+    #         })
+    # else:
+    #     filtered_data = data.groupby('Id_date_agr').agg({
+    #         'Montant(€)': 'sum',
+    #         'Montant 7€': 'sum'
+    #         })
+    # print(filtered_data.shape)
+
+    
     return filtered_data
 
 
@@ -79,41 +134,40 @@ def evaluate_model(model, data):
     return mae, r2
 
 # Function to perform grid search
-def grid_search(data, p_values, d_values, q_values, P_values, D_values, Q_values, S_values):
+def grid_search(data, p_values, d_values, q_values, P_values, D_values, Q_values, S_values, n_jobs=-1):
     best_aic = float('inf')
-    best_r2 = -1 * float('inf')
+    best_mae = float('inf')
     best_params = None
     best_model = None
-    itr = 0
-
-    for p, d, q, P, D, Q, S in product(p_values, d_values, q_values, P_values, D_values, Q_values, S_values):
-        itr+=1
-        print(f"combinaison{itr}")
-        if (p,d,q)==(0,0,0) or (P, D, Q)==(0,0,0):continue
+    results_cache = {}
+    
+    def evaluate_combination(p, d, q, P, D, Q, S):
+        if (p,d,q)==(0,0,0) or (P, D, Q)==(0,0,0): return None, None, None, None, None, None
+        seasonal_order = (P, D, Q, S)
+        order = (p, d, q)
+        if (order, seasonal_order) in results_cache:
+            return results_cache[(order, seasonal_order)]
         try:
-            seasonal_order = (P, D, Q, S)
-            order = (p, d, q)
             model = train_sarima_model(data, order, seasonal_order)
             mae, r2 = evaluate_model(model, data)
             aic = model.aic
-
-            
-
-            if aic < best_aic and r2 > best_r2:
-                best_aic = aic
-                best_r2 = r2
-                best_params = {'order': order, 'seasonal_order': seasonal_order}
-                best_model = model
-                metrics.append({
-                'order': order,
-                'seasonal_order': seasonal_order,
-                'aic': aic,
-                'mae': mae,
-                'r2': r2
-            })
-
+            results_cache[(order, seasonal_order)] = (model, mae, r2, aic, order, seasonal_order)
+            return model, mae, r2, aic, order, seasonal_order
         except Exception as e:
             print(f"Model fitting failed for order={order} and seasonal_order={seasonal_order}: {e}")
+            return None, None, None, None, None, None
+    
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_combination)(p, d, q, P, D, Q, S)
+        for p, d, q, P, D, Q, S in product(p_values, d_values, q_values, P_values, D_values, Q_values, S_values)
+    )
+
+    for model, mae, r2, aic, order, seasonal_order in results:
+        if model is not None and aic < best_aic and mae < best_mae:
+            best_aic = aic
+            best_mae = mae
+            best_model = model
+            best_params = {'order': order, 'seasonal_order': seasonal_order}
     
     return best_model, best_params
 
@@ -128,6 +182,14 @@ def load_model(filename):
         model = pickle.load(file)
     return model
 
+def load_lottieurl(url: str):
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+
+
 
 # Function to forecast with trained model
 def forecast_with_model(model, steps=12):
@@ -135,21 +197,48 @@ def forecast_with_model(model, steps=12):
     
     forecast_mean = forecast.predicted_mean
     forecast_index = forecast_mean.index
+    forecast_band_inf  = forecast.conf_int().iloc[:, 0]
+    forecast_band_sup  = forecast.conf_int().iloc[:, 1]
 
-    return pd.Series(forecast_mean, index=forecast_index)
+    return pd.Series(forecast_mean, index=forecast_index) , pd.Series(forecast_band_inf, index=forecast_index), pd.Series(forecast_band_sup, index=forecast_index) 
 
 # Function to plot forecast
-def plot_forecast(data, forecast, title):
-    fig = plt.figure(figsize=(12, 6))
-    plt.plot(data.index, data['Montant(€)'], label='Historical Budget', color='blue')
-    plt.plot(forecast.index, forecast, label='Forecasted Budget', color='red')
-    plt.title(f'Historical and Forecasted Budget: {title}')
-    plt.xlabel('Date')
-    plt.ylabel('Budget')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-    st.pyplot(fig)
+def plot_forecast(data, forecast_elems, title):
+
+    chart = st.empty()
+
+    forecast_df = pd.DataFrame({'Date': forecast_elems[0].index, 'Montant(€)': forecast_elems[0], 'lower' : forecast_elems[1], 'upper' : forecast_elems[2]})
+    forecast_df['Type'] = 'Forecast'
+    
+    historical_df = pd.DataFrame({'Date': data.index, 'Montant(€)': data['Montant(€)']})
+    historical_df['Type'] = 'Historical'
+
+    history = alt.Chart(historical_df, title='Forecast').mark_line(color='blue').encode(
+        alt.X('Date:T', scale=alt.Scale(zero=False)),
+        alt.Y('Montant(€):Q', scale=alt.Scale(zero=False))).properties(
+        height=360, width=720).interactive()
+    chart.altair_chart(history, use_container_width=True)
+
+    for i in range(1,len(forecast_df)+1):
+        new_points = alt.Chart(forecast_df[0:i], title='Forecast').mark_line(
+        point=alt.OverlayMarkDef(color="green") ,
+        color='green').encode(
+                              alt.X('Date:T', scale=alt.Scale(zero=False)),
+                              alt.Y('Montant(€)', scale=alt.Scale(zero=False))).properties(
+                              height=360, width=720).interactive()
+        
+        # Confidence Interval Band
+        band = alt.Chart(forecast_df[0:i]).mark_area(color='red',
+                        opacity=0.1
+                    ).encode(
+                        x='Date:T',
+                        y='lower',
+                        y2='upper'
+                    )
+        chart.altair_chart(history + new_points + band, use_container_width=True)
+        time.sleep(0.25)
+
+
 
 
 
@@ -157,8 +246,11 @@ def plot_forecast(data, forecast, title):
 
 
 def main_prediction(data,user_selection):
+    
+    with st.spinner("Un instant SVP..."):
     # Filter data based on user selections
-    filtered_data = filter_data(data, user_selection)
+        filtered_data = filter_data(data, user_selection)
+
 
 
     if user_selection is not None:
@@ -177,22 +269,35 @@ def main_prediction(data,user_selection):
         # Try to load existing model
         best_model = load_model(model_filename)
         print(f"Loaded model from {model_filename}")
+    
     except FileNotFoundError:
-        # Hyperparameter grid
-        p_values = [0, 1]
-        d_values = [0, 1]
-        q_values = [0, 1]
-        P_values = [0, 1]
-        D_values = [0, 1]
-        Q_values = [0, 1]
-        S_values = [12]
 
-        # Perform grid search
-        print("Performing grid search...")
-        best_model, best_params = grid_search(filtered_data, p_values, d_values, q_values, P_values, D_values, Q_values, S_values)
+        lottie_url = "https://lottie.host/c77201ed-d240-4ce1-bd63-f90f6cca2636/dmyuWmo0Ov.json"
+        lottie_animation = load_lottieurl(lottie_url)
+        info_message = st.empty()
+            
+        with st_lottie_spinner(lottie_animation, speed=1, loop=True, height=200, width=200):
+            info_message.info("La combinaison sélectionnée est nouvelle, je l'analyse pour vous fournir une réponse sous peu. Cela peut prendre jusqu'à une minute...")
 
+
+            # Hyperparameter grid
+            p_values = [0, 1, 2]
+            d_values = [0, 1, 2]
+            q_values = [0, 1, 2]
+            P_values = [0, 1, 2]
+            D_values = [0, 1, 2]
+            Q_values = [0, 1, 2]
+            S_values = [12]
+
+            # Perform grid search
+            print("Performing grid search...")
+            
+            best_model, best_params = grid_search(filtered_data, p_values, d_values, q_values, P_values, D_values, Q_values, S_values)
+            
+            info_message.empty()
+        
         if best_model:
-            print(f"Best model parameters: {best_params}")
+            # print(f"Best model parameters: {best_params}")
 
             # Save the best model
             save_model(best_model, model_filename)
@@ -204,13 +309,15 @@ def main_prediction(data,user_selection):
 
 
     # Forecast
-    forecast = forecast_with_model(best_model)
+    forecast_elms = forecast_with_model(best_model, user_selection['steps'])
+
 
     # Plot results
+    st.success("L'analyse est terminée. Voici le résultat :") 
     if user_selection is not None:
-        plot_forecast(filtered_data, forecast, ' / '.join([f'{k}: {v}' for k, v in list(user_selection.items())[1:] if v and user_selection]))
+        plot_forecast(filtered_data, forecast_elms, ' / '.join([f'{k}: {v}' for k, v in list(user_selection.items())[1:] if v and user_selection]))
     else:
-        plot_forecast(filtered_data, forecast, ' / all data')
+        plot_forecast(filtered_data, forecast_elms, ' / all data')
 
 
 # selection_columns = ['Code journal', 'No séquence', 'Id_Rub', 'ID_Compte', 'ID_Cc',
@@ -219,57 +326,81 @@ def main_prediction(data,user_selection):
 #        'ID_Rubrique_Altice', 'Id_Client', 'Id_Projet', 'Id_Zone',
 #        ]
 
-selection_columns = ['Code journal', 'Id_Rub', 'ID_Compte', 'ID_Cc',
-       'ID_Site', 'ID_Soc', 'Rubrique_Altice', 'Société_IC',
-       'Filter_Type', 'id_Rub_Rep', 'Rubrique_Altice_Réallo',
-       'ID_Rubrique_Altice', 'Id_Client', 'Id_Projet', 'Id_Zone',
-       ]
+# selection_columns = ['Code journal', 'Id_Rub', 'ID_Compte', 'ID_Cc',
+#        'ID_Site', 'ID_Soc', 'Rubrique_Altice', 'Société_IC',
+#        'Filter_Type', 'id_Rub_Rep', 'Rubrique_Altice_Réallo',
+#        'ID_Rubrique_Altice', 'Id_Client', 'Id_Projet', 'Id_Zone',
+#        ]
 
+selection_columns = ['Code journal', 
+                    'Rubrique_Altice', 'Société_IC', 'Filter_Type',
+                    'Rubrique_Altice_Réallo',
+                    'Compte',
+                    'Rubrique REP N1',
+                    'Rubrique REP N2',
+                    'Rubrique REP N3',
+                    'Rubrique REP N4',
+                    'Rubrique REP N5',
+                    'Rubrique N1',
+                    'Rubrique N2',
+                    'Rubrique N3',
+                    'Rubrique N4',
+                    'Rubrique N5',
+                    'Nom de section',
+                    'Nom site',
+                    'Nom société',
+                    'Client',
+                    'Projet',
+                    'Zone'             
+                   ]
 
 
 # Define options for the dropdown lists
 
-options = {f"{selection_columns[i]}": ["All"] + data[selection_columns[i]].unique().tolist() for i in range(len(selection_columns))}
+options = {f"{selection_columns[i]}": data[selection_columns[i]].unique().tolist() for i in range(len(selection_columns))}
 
 
 # Streamlit application layout
-st.title("Streamlit Application with 17 Inputs")
+st.title("Prévoir le Montant future")
 
 
 with st.form(key='my_form'):
     # Slider input
-    slider_value = st.slider("Select a value", min_value=0, max_value=12, step=1)
+    slider_value = st.slider("Choisir le mois future à prévoir", min_value=1, max_value=24, step=1)
 
     # Expanders for dropdowns
     dropdown_values = {}
 
-    with st.expander("Show/Hide Dropdown Selections"):
+    with st.expander("Appliquer des filtres spécifiques"):
 
     
         cols = st.columns(4)
         
         for i, (col_name, values) in enumerate(options.items()):
             with cols[i % 4]:
-                selected_values = st.multiselect(col_name, options=values)
-                
-                # If "All" is selected, select all other options
-                if "All" in selected_values:
-                    selected_values = values[1:]  # Exclude "All" from the list
-                
+                selected_values = st.multiselect(col_name, options=sorted(values, key=str), placeholder='Choisir les valeurs')
                 dropdown_values[col_name] = selected_values
-        submit_button = st.form_submit_button(label='Confirm')
+    submit_button = st.form_submit_button(label='Prévoir le Montant(€)')
 
-    if submit_button:
-        st.write("Selections confirmed!")
+if submit_button:
+    # st.write("Selections confirmed!")
 
-        # Store user selections in a dictionary
-        user_selection = {
-            'Slider Value': slider_value,
-            **dropdown_values
-        }
+    # Store user selections in a dictionary
+    user_selection = {
+        'steps': slider_value,
+        **dropdown_values
+    }
 
-        # Display the selected values
-        st.subheader("Selected Values")
-        st.write(user_selection)
+    # # Display the selected values
+    # st.subheader("Selected Values")
+    # st.write(user_selection)
 
-main_prediction(data, user_selection)
+    
+    
+
+
+        
+    with st.container():
+        main_prediction(data, user_selection)
+            
+
